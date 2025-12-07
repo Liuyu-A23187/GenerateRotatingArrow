@@ -1,105 +1,308 @@
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+"""
+箭头旋转动画生成器
+
+使用matplotlib生成旋转箭头动画，并导出为支持透明背景的MOV格式视频。
+通过生成PNG序列并使用ffmpeg合成，确保透明通道的完整性。
+"""
+
+import os
+import shutil
+import subprocess
+import tempfile
+
 import matplotlib.animation as animation
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 import numpy as np
 
-# 可调参数
-ARROW_SIZE = 100  # 箭头长度（像素）
-ARROW_WIDTH = 40  # 箭头头部宽度（像素）
-ARROW_BODY_WIDTH = 10  # 箭头身体宽度（像素）
-ARROW_COLOR = 'red'  # 箭头颜色
 
-# 视频参数
-WIDTH = 400
-HEIGHT = 400
-FPS = 30
-DURATION = 10  # 秒
-FREQUENCY = 0.5  # Hz（每2秒转一圈）
-
-# 计算总帧数
-TOTAL_FRAMES = FPS * DURATION
-
-# 创建图形和轴
-fig, ax = plt.subplots(figsize=(WIDTH/100, HEIGHT/100), dpi=100)
-ax.set_xlim(-WIDTH/2, WIDTH/2)
-ax.set_ylim(-HEIGHT/2, HEIGHT/2)
-ax.set_aspect('equal')
-ax.axis('off')  # 隐藏坐标轴
-
-# 旋转中心偏移（向尾端偏移20%）
-ROTATION_OFFSET = - ARROW_SIZE * 0.1  # 向尾端（y轴负方向）偏移
-
-# 创建箭头（使用Polygon绘制，中心在原点）
-def create_arrow_polygon(angle):
-    """创建箭头多边形，围绕偏移后的中心点旋转"""
-    # 箭头形状：从中心点向前的箭头
-    # 箭头头部在y轴正方向，尾部在y轴负方向
-    # 旋转中心向尾端偏移20%，所以所有点的y坐标需要减去偏移量
-    # 头部结束位置（y坐标）
-    head_end_y = ARROW_SIZE/2 - ARROW_WIDTH
+class ArrowAnimationGenerator:
+    """箭头旋转动画生成器类
     
-    arrow_points = np.array([
-        [0, ARROW_SIZE/2 - ROTATION_OFFSET],  # 箭头尖端
-        [-ARROW_WIDTH/2, ARROW_SIZE/2 - ARROW_WIDTH - ROTATION_OFFSET],  # 左翼
-        [-ARROW_WIDTH/4, ARROW_SIZE/2 - ARROW_WIDTH - ROTATION_OFFSET],  # 左翼内侧
-        [-ARROW_BODY_WIDTH/2, head_end_y - ROTATION_OFFSET],  # 左身体起点（从头部结束位置开始使用恒定宽度）
-        [-ARROW_BODY_WIDTH/2, -ARROW_SIZE/2 - ROTATION_OFFSET],  # 左尾部（恒定宽度）
-        [ARROW_BODY_WIDTH/2, -ARROW_SIZE/2 - ROTATION_OFFSET],  # 右尾部（恒定宽度）
-        [ARROW_BODY_WIDTH/2, head_end_y - ROTATION_OFFSET],  # 右身体起点（从头部结束位置开始使用恒定宽度）
-        [ARROW_WIDTH/4, ARROW_SIZE/2 - ARROW_WIDTH - ROTATION_OFFSET],  # 右翼内侧
-        [ARROW_WIDTH/2, ARROW_SIZE/2 - ARROW_WIDTH - ROTATION_OFFSET],  # 右翼
-    ])
+    生成一个旋转的箭头动画，并导出为支持透明背景的MOV格式视频。
     
-    # 旋转矩阵（顺时针旋转）
-    cos_a = np.cos(angle)
-    sin_a = np.sin(angle)
-    rotation_matrix = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
+    Attributes:
+        arrow_size (int): 箭头长度（像素），默认100
+        arrow_width (int): 箭头头部宽度（像素），默认40
+        arrow_body_width (int): 箭头身体宽度（像素），默认10
+        arrow_color (str): 箭头颜色，默认'red'
+        width (int): 视频宽度（像素），默认400
+        height (int): 视频高度（像素），默认400
+        fps (int): 帧率，默认30
+        duration (float): 视频时长（秒），默认20
+        frequency (float): 旋转频率（Hz），默认0.5（每2秒转一圈）
+        output_file (str): 输出文件名，默认'arrow_rotation.mov'
+    """
     
-    # 应用旋转
-    rotated_points = arrow_points @ rotation_matrix.T
+    def __init__(
+        self,
+        arrow_size: int = 100,
+        arrow_width: int = 40,
+        arrow_body_width: int = 10,
+        arrow_color: str = 'red',
+        width: int = 400,
+        height: int = 400,
+        fps: int = 30,
+        duration: float = 20.0,
+        frequency: float = 0.5,
+        output_file: str = 'arrow_rotation.mov'
+    ):
+        """初始化箭头动画生成器
+        
+        Args:
+            arrow_size: 箭头长度（像素）
+            arrow_width: 箭头头部宽度（像素）
+            arrow_body_width: 箭头身体宽度（像素）
+            arrow_color: 箭头颜色
+            width: 视频宽度（像素）
+            height: 视频高度（像素）
+            fps: 帧率
+            duration: 视频时长（秒）
+            frequency: 旋转频率（Hz），0.5表示每2秒转一圈
+            output_file: 输出文件名
+        """
+        # 箭头参数
+        self.arrow_size = arrow_size
+        self.arrow_width = arrow_width
+        self.arrow_body_width = arrow_body_width
+        self.arrow_color = arrow_color
+        
+        # 视频参数
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.duration = duration
+        self.frequency = frequency
+        self.output_file = output_file
+        
+        # 计算总帧数
+        self.total_frames = int(self.fps * self.duration)
+        
+        # 旋转中心偏移（向尾端偏移10%）
+        self.rotation_offset = -self.arrow_size * 0.1
+        
+        # matplotlib对象
+        self.fig = None
+        self.ax = None
+        self.arrow_polygon = None
+        self.anim = None
+        
+        # 初始化图形
+        self._init_figure()
     
-    return rotated_points
-
-# 初始化箭头
-arrow_polygon = None
-
-def animate(frame):
-    """动画更新函数"""
-    global arrow_polygon
+    def _init_figure(self):
+        """初始化matplotlib图形和轴"""
+        self.fig, self.ax = plt.subplots(
+            figsize=(self.width/100, self.height/100),
+            dpi=100
+        )
+        
+        # 设置背景透明
+        self.fig.patch.set_facecolor('none')
+        self.ax.set_facecolor('none')
+        
+        # 设置坐标轴范围
+        self.ax.set_xlim(-self.width/2, self.width/2)
+        self.ax.set_ylim(-self.height/2, self.height/2)
+        self.ax.set_aspect('equal')
+        self.ax.axis('off')  # 隐藏坐标轴
     
-    # 清除之前的箭头
-    if arrow_polygon is not None:
-        arrow_polygon.remove()
+    def create_arrow_polygon(self, angle: float) -> np.ndarray:
+        """创建箭头多边形，围绕偏移后的中心点旋转
+        
+        Args:
+            angle: 旋转角度（弧度）
+            
+        Returns:
+            旋转后的箭头顶点坐标数组
+        """
+        # 头部结束位置（y坐标）
+        head_end_y = self.arrow_size / 2 - self.arrow_width
+        
+        # 定义箭头形状的顶点（中心在原点，头部在y轴正方向）
+        arrow_points = np.array([
+            [0, self.arrow_size/2 - self.rotation_offset],  # 箭头尖端
+            [-self.arrow_width/2, self.arrow_size/2 - self.arrow_width - self.rotation_offset],  # 左翼
+            [-self.arrow_width/4, self.arrow_size/2 - self.arrow_width - self.rotation_offset],  # 左翼内侧
+            [-self.arrow_body_width/2, head_end_y - self.rotation_offset],  # 左身体起点
+            [-self.arrow_body_width/2, -self.arrow_size/2 - self.rotation_offset],  # 左尾部
+            [self.arrow_body_width/2, -self.arrow_size/2 - self.rotation_offset],  # 右尾部
+            [self.arrow_body_width/2, head_end_y - self.rotation_offset],  # 右身体起点
+            [self.arrow_width/4, self.arrow_size/2 - self.arrow_width - self.rotation_offset],  # 右翼内侧
+            [self.arrow_width/2, self.arrow_size/2 - self.arrow_width - self.rotation_offset],  # 右翼
+        ])
+        
+        # 旋转矩阵（顺时针旋转）
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        rotation_matrix = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
+        
+        # 应用旋转
+        rotated_points = arrow_points @ rotation_matrix.T
+        
+        return rotated_points
     
-    # 计算当前角度（顺时针旋转，0.5Hz）
-    # 0.5Hz意味着每2秒转一圈（360度）
-    t = frame / FPS  # 当前时间（秒）
-    angle = 2 * np.pi * FREQUENCY * t  # 正角度配合顺时针旋转矩阵
+    def animate(self, frame: int) -> list:
+        """动画更新函数
+        
+        Args:
+            frame: 当前帧号
+            
+        Returns:
+            更新的图形元素列表
+        """
+        # 清除之前的箭头
+        if self.arrow_polygon is not None:
+            self.arrow_polygon.remove()
+        
+        # 计算当前角度（顺时针旋转）
+        t = frame / self.fps  # 当前时间（秒）
+        angle = 2 * np.pi * self.frequency * t
+        
+        # 创建新的箭头
+        points = self.create_arrow_polygon(angle)
+        self.arrow_polygon = patches.Polygon(
+            points,
+            closed=True,
+            facecolor=self.arrow_color,
+            edgecolor=self.arrow_color
+        )
+        self.ax.add_patch(self.arrow_polygon)
+        
+        return [self.arrow_polygon]
     
-    # 创建新的箭头
-    points = create_arrow_polygon(angle)
-    arrow_polygon = patches.Polygon(points, closed=True, 
-                                     facecolor=ARROW_COLOR, 
-                                     edgecolor=ARROW_COLOR)
-    ax.add_patch(arrow_polygon)
+    def _check_ffmpeg(self) -> bool:
+        """检查ffmpeg是否可用
+        
+        Returns:
+            如果ffmpeg可用返回True，否则返回False
+        """
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-version'],
+                capture_output=True,
+                text=True
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
     
-    return [arrow_polygon]
+    def generate_frames(self, temp_dir: str) -> None:
+        """生成PNG图片序列
+        
+        Args:
+            temp_dir: 临时目录路径
+            
+        Raises:
+            RuntimeError: 如果生成帧时出错
+        """
+        print("正在生成PNG序列...")
+        
+        try:
+            for frame in range(self.total_frames):
+                # 更新动画到当前帧
+                self.animate(frame)
+                
+                # 保存当前帧
+                frame_path = os.path.join(temp_dir, f'frame_{frame:04d}.png')
+                self.fig.savefig(
+                    frame_path,
+                    transparent=True,
+                    dpi=100,
+                    bbox_inches='tight',
+                    pad_inches=0,
+                    facecolor='none'
+                )
+                
+                # 显示进度
+                if (frame + 1) % 100 == 0:
+                    print(f"已生成 {frame + 1}/{self.total_frames} 帧")
+            
+            print(f"PNG序列生成完成，共 {self.total_frames} 帧")
+            
+        except Exception as e:
+            raise RuntimeError(f"生成PNG序列时出错: {str(e)}")
+    
+    def create_video(self, temp_dir: str) -> None:
+        """使用ffmpeg合成MOV文件
+        
+        Args:
+            temp_dir: 临时目录路径（包含PNG序列）
+            
+        Raises:
+            RuntimeError: 如果ffmpeg不可用或合成失败
+        """
+        # 检查ffmpeg是否可用
+        if not self._check_ffmpeg():
+            raise RuntimeError(
+                "ffmpeg未找到。请确保已安装ffmpeg并添加到系统PATH中。"
+            )
+        
+        print(f"正在使用ffmpeg合成MOV文件: {self.output_file}")
+        
+        # 构建ffmpeg命令（使用qtrle编码器支持透明通道）
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-y',  # 覆盖输出文件
+            '-framerate', str(self.fps),
+            '-i', os.path.join(temp_dir, 'frame_%04d.png'),
+            '-vcodec', 'qtrle',  # QuickTime Animation编码器，支持透明
+            '-pix_fmt', 'argb',  # ARGB像素格式，支持alpha通道
+            self.output_file
+        ]
+        
+        # 执行ffmpeg命令
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            error_msg = result.stderr if result.stderr else result.stdout
+            raise RuntimeError(f"ffmpeg合成失败: {error_msg}")
+        
+        print(f"完成！已保存为: {self.output_file}")
+    
+    def run(self) -> None:
+        """执行完整的动画生成流程
+        
+        生成PNG序列，使用ffmpeg合成MOV文件，并清理临时文件。
+        
+        Raises:
+            RuntimeError: 如果生成过程中出错
+        """
+        # 打印参数信息
+        print("正在生成动画文件（透明背景）...")
+        print(f"分辨率: {self.width}x{self.height}")
+        print(f"帧率: {self.fps} fps")
+        print(f"时长: {self.duration} 秒")
+        print(f"总帧数: {self.total_frames}")
+        print(
+            f"箭头大小: {self.arrow_size}, "
+            f"头部宽度: {self.arrow_width}, "
+            f"身体宽度: {self.arrow_body_width}"
+        )
+        
+        # 创建临时目录
+        temp_dir = tempfile.mkdtemp(prefix='arrow_frames_')
+        print(f"正在生成PNG序列到临时目录: {temp_dir}")
+        
+        try:
+            # 第一步：生成PNG序列
+            self.generate_frames(temp_dir)
+            
+            # 第二步：使用ffmpeg合成MOV文件
+            self.create_video(temp_dir)
+            
+        finally:
+            # 清理临时文件
+            print("正在清理临时文件...")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            print("清理完成")
 
-# 创建动画
-anim = animation.FuncAnimation(fig, animate, frames=TOTAL_FRAMES, 
-                              interval=1000/FPS, blit=True, repeat=False)
 
-# 保存为MOV文件
-print(f"正在生成MOV文件...")
-print(f"分辨率: {WIDTH}x{HEIGHT}")
-print(f"帧率: {FPS} fps")
-print(f"时长: {DURATION} 秒")
-print(f"总帧数: {TOTAL_FRAMES}")
-print(f"箭头大小: {ARROW_SIZE}, 头部宽度: {ARROW_WIDTH}, 身体宽度: {ARROW_BODY_WIDTH}")
+def main():
+    """主函数：创建并运行箭头动画生成器"""
+    generator = ArrowAnimationGenerator()
+    generator.run()
 
-output_file = 'arrow_rotation.mov'
-writer = animation.FFMpegWriter(fps=FPS, codec='libx264', bitrate=5000)
-anim.save(output_file, writer=writer)
 
-print(f"完成！已保存为: {output_file}")
-
+if __name__ == '__main__':
+    main()
